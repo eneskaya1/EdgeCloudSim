@@ -145,11 +145,13 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 				else
 				{
 					SimLogger.getInstance().failedDueToMobility(task.getCloudletId(), CloudSim.clock());
+					DeadlineStatsLogger.getInstance().taskFailed(task.getCloudletId());
 				}
 			}
 			else
 			{
 				SimLogger.getInstance().failedDueToBandwidth(task.getCloudletId(), CloudSim.clock(), NETWORK_DELAY_TYPES.WAN_DELAY);
+				DeadlineStatsLogger.getInstance().taskFailed(task.getCloudletId());
 			}
 		}
 		else{
@@ -189,11 +191,13 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 				else
 				{
 					SimLogger.getInstance().failedDueToMobility(task.getCloudletId(), CloudSim.clock());
+					DeadlineStatsLogger.getInstance().taskFailed(task.getCloudletId());
 				}
 			}
 			else
 			{
 				SimLogger.getInstance().failedDueToBandwidth(task.getCloudletId(), CloudSim.clock(), delayType);
+				DeadlineStatsLogger.getInstance().taskFailed(task.getCloudletId());
 			}
 		}
 	}
@@ -265,6 +269,8 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 							CloudSim.clock(),
 							SimSettings.VM_TYPES.EDGE_VM.ordinal(),
 							NETWORK_DELAY_TYPES.MAN_DELAY);
+					// Task was already offloaded towards a remote edge, so count it as failed
+					DeadlineStatsLogger.getInstance().taskFailed(task.getCloudletId());
 				}
 
 				break;
@@ -290,11 +296,13 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 					else
 					{
 						SimLogger.getInstance().failedDueToMobility(task.getCloudletId(), CloudSim.clock());
+						DeadlineStatsLogger.getInstance().taskFailed(task.getCloudletId());
 					}
 				}
 				else
 				{
 					SimLogger.getInstance().failedDueToBandwidth(task.getCloudletId(), CloudSim.clock(), NETWORK_DELAY_TYPES.WLAN_DELAY);
+					DeadlineStatsLogger.getInstance().taskFailed(task.getCloudletId());
 				}
 
 				break;
@@ -310,6 +318,7 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 					networkModel.downloadFinished(task.getSubmittedLocation(), SimSettings.GENERIC_EDGE_DEVICE_ID);
 
 				SimLogger.getInstance().taskEnded(task.getCloudletId(), CloudSim.clock());
+				DeadlineStatsLogger.getInstance().taskCompleted(task.getCloudletId(), CloudSim.clock());
 				break;
 			}
 			default:
@@ -357,6 +366,7 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 				(int)task.getCloudletLength(),
 				(int)task.getCloudletFileSize(),
 				(int)task.getCloudletOutputSize());
+		DeadlineStatsLogger.getInstance().taskSubmitted(task.getCloudletId(), task.getTaskType(), CloudSim.clock());
 
 		long startTime = System.nanoTime();
 		int nextHopId = SimManager.getInstance().getEdgeOrchestrator().getDeviceToOffload(task);
@@ -399,14 +409,18 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 				getCloudletList().add(task);
 				bindCloudletToVm(task.getCloudletId(), selectedVM.getId());
 
+				DeadlineStatsLogger.TIER tier = DeadlineStatsLogger.TIER.CLOUD;
 				if(selectedVM instanceof EdgeVM){
 					EdgeHost host = (EdgeHost)(selectedVM.getHost());
+					tier = DeadlineStatsLogger.TIER.LOCAL_EDGE;
 
 					//if neighbor edge device is selected
 					if(host.getLocation().getServingWlanId() != task.getSubmittedLocation().getServingWlanId()){
 						nextEvent = REQUEST_RECEIVED_BY_EDGE_DEVICE_TO_RELAY_NEIGHBOR;
+						tier = DeadlineStatsLogger.TIER.REMOTE_EDGE;
 					}
 				}
+				DeadlineStatsLogger.getInstance().taskOffloaded(task.getCloudletId(), tier);
 				networkModel.uploadStarted(currentLocation, nextDeviceForNetworkModel);
 
 				SimLogger.getInstance().taskStarted(task.getCloudletId(), CloudSim.clock());
@@ -417,12 +431,14 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 			else{
 				// VM capacity failure
 				SimLogger.getInstance().rejectedDueToVMCapacity(task.getCloudletId(), CloudSim.clock(), vmType);
+				DeadlineStatsLogger.getInstance().taskRejected(task.getCloudletId());
 			}
 		}
 		else
 		{
 			// Bandwidth rejection
 			SimLogger.getInstance().rejectedDueToBandwidth(task.getCloudletId(), CloudSim.clock(), vmType, delayType);
+			DeadlineStatsLogger.getInstance().taskRejected(task.getCloudletId());
 		}
 	}
 

@@ -5,6 +5,7 @@
 		<prob_cloud_selection>20</prob_cloud_selection>
 		<poisson_interarrival>2</poisson_interarrival>
 		<delay_sensitivity>0</delay_sensitivity>
+		<max_delay_requirement>2.5</max_delay_requirement>
 		<active_period>40</active_period>
 		<idle_period>20</idle_period>
 		<data_upload>1500</data_upload>
@@ -20,6 +21,7 @@
 		<prob_cloud_selection>20</prob_cloud_selection>
 		<poisson_interarrival>3</poisson_interarrival>
 		<delay_sensitivity>0</delay_sensitivity>
+		<max_delay_requirement>1.0</max_delay_requirement>
 		<active_period>45</active_period>
 		<idle_period>90</idle_period>
 		<data_upload>50</data_upload>
@@ -35,6 +37,7 @@
 		<prob_cloud_selection>10</prob_cloud_selection>
 		<poisson_interarrival>7</poisson_interarrival>
 		<delay_sensitivity>0</delay_sensitivity>
+		<max_delay_requirement>3.0</max_delay_requirement>
 		<active_period>30</active_period>
 		<idle_period>45</idle_period>
 		<data_upload>250</data_upload>

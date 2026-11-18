@@ -164,6 +164,7 @@ public class MainApp {
 						SimLogger.printLine("Scenario: " + simScenario + " - Policy: " + orchestratorPolicy + " - #iteration: " + iterationNumber);
 						SimLogger.printLine("Duration: " + SS.getSimulationTime()/60 + " min (warm up period: "+ SS.getWarmUpPeriod()/60 +" min) - #devices: " + j);
 						SimLogger.getInstance().simStarted(outputFolder,"SIMRESULT_" + simScenario + "_"  + orchestratorPolicy + "_" + j + "DEVICES");
+						DeadlineStatsLogger.getInstance().simStarted(outputFolder,"SIMRESULT_" + simScenario + "_"  + orchestratorPolicy + "_" + j + "DEVICES");
 
 						try
 						{
@@ -187,6 +188,9 @@ public class MainApp {
 
 							// Launch simulation (blocking until completion)
 							manager.startSimulation();
+
+							// Write deadline / tier statistics of this run
+							DeadlineStatsLogger.getInstance().simStopped();
 						}
 						catch (Exception e)
 						{
