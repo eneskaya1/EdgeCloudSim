@@ -49,6 +49,7 @@ an `ALL_APPS` row (the first line is a `#` header):
 | `on_time_pct`, `deadline_miss_pct` | `on_time / total` and its complement |
 | `avg_service_time_s`, `p95_service_time_s`, `avg_lateness_s` | Over completed tasks; lateness only over late tasks |
 | `on_time_*`, `completed_*` | On-time and completed counts per tier |
+| `estimated`, `est_mean_error_s`, `est_mean_abs_error_s` | ECT only: completed tasks with an estimate and the mean (absolute) estimation error |
 
 A short summary line (`deadline: on-time ... | tiers L/R/C ...`) is also printed
 to the console after each run.
@@ -64,7 +65,47 @@ rejected during warm-up, because rejected tasks never set the warm-up flag.
 | `RANDOM` | 50/50 random choice between edge and cloud (baseline). |
 | `UTILIZATION_BASED` | Cloud if average edge utilization > 75%, otherwise edge. |
 | `NETWORK_BASED` | Cloud if estimated WAN bandwidth > 5 Mbps, otherwise edge. |
-| `ECT` *(proposed, to be implemented)* | Estimates end-to-end completion time on the local edge, best remote edge and cloud; picks the fastest candidate that meets the task deadline. |
+| `ECT` *(proposed)* | Deadline-aware Estimated Completion Time; see below. |
+
+The competitors pick a VM with the least-loaded rule (largest free CPU %) among
+all edge VMs or all cloud VMs. Because there are 14 edge servers, the chosen edge
+VM is usually on a *remote* server, reached via the MAN.
+
+### Proposed Policy: Deadline-Aware Estimated Completion Time (ECT)
+
+Implemented in `DeadlineEdgeOrchestrator`. For each new task and **every VM** that
+can host it (same CPU-capacity admission rule as the competitors), ECT estimates
+the end-to-end service time:
+
+```
+ECT = upload delay + execution time + download delay
+  local edge : WLAN up                   + exec + WLAN down
+  remote edge: WLAN up + MAN up          + exec + MAN down + WLAN down
+  cloud      : WAN up                    + exec + WAN down
+```
+
+* **Network delays** come from the current state of the network model (number of
+  active WLAN/WAN users per access point, M/M/1 model of the MAN). The MAN is
+  probed with side-effect-free `estimateMan*Delay()` methods, so ECT's estimates
+  do not change the MAN model's statistics.
+* **Execution time** replays CloudSim's time-shared scheduler: with `k` running
+  single-core tasks on a VM with `P` cores of `m` MIPS, each task runs at
+  `m * min(1, P/k)`. ECT does this for the tasks already running on the VM (their
+  remaining length), the tasks still uploading to it (tracked by ECT itself) and
+  the new task, until the new task finishes.
+* **Decision:** a candidate is *safely on time* if `ECT <= 0.8 * deadline`
+  (`SAFETY_MARGIN`). Among those, ECT picks the **cheapest tier** (local edge, then
+  remote edge, then cloud), which saves MAN and WAN bandwidth for other tasks. Within
+  a tier it picks the smallest ECT. If no candidate is safely on time, it
+  picks the candidate with the smallest ECT.
+
+Assumption: like most offloading studies, ECT knows the length (MI) and data sizes
+of the task when it is created (e.g. from application profiling). The competitors
+do not use this information.
+
+The estimate of every ECT task is logged, and the `estimated`, `est_mean_error_s`
+and `est_mean_abs_error_s` columns of the `_DEADLINE.log` file report the estimator's
+accuracy (actual minus estimated service time).
 
 ## Running
 

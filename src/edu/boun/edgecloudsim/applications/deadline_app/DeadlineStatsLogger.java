@@ -62,6 +62,9 @@ public final class DeadlineStatsLogger {
 	private int[][] completedByTier; // [app][tier]
 	private List<List<Double>> serviceTimes; // service times of completed tasks
 	private double[] lateness;    // sum of (serviceTime - deadline) for late tasks
+	private int[] estimated;      // completed tasks that carry an orchestrator estimate (ECT)
+	private double[] estError;    // sum of (actual - estimated) service time
+	private double[] estAbsError; // sum of |actual - estimated| service time
 
 	private DeadlineStatsLogger() {
 	}
@@ -92,6 +95,9 @@ public final class DeadlineStatsLogger {
 		onTimeByTier = new int[n][TIER.values().length];
 		completedByTier = new int[n][TIER.values().length];
 		lateness = new double[n];
+		estimated = new int[n];
+		estError = new double[n];
+		estAbsError = new double[n];
 		serviceTimes = new ArrayList<>();
 		for (int i = 0; i < n; i++)
 			serviceTimes.add(new ArrayList<>());
@@ -114,6 +120,13 @@ public final class DeadlineStatsLogger {
 		r.tier = tier;
 		tierCount[r.taskType][tier.ordinal()]++;
 		tierCount[numOfApps][tier.ordinal()]++;
+	}
+
+	/** The orchestrator's estimated service time for the task (used by ECT). */
+	public void taskEstimated(int taskId, double estimatedServiceTime) {
+		TaskRecord r = liveTasks.get(taskId);
+		if (r != null)
+			r.estimate = estimatedServiceTime;
 	}
 
 	/** The task was rejected before offloading (no VM capacity / no bandwidth). */
@@ -146,6 +159,11 @@ public final class DeadlineStatsLogger {
 		for (int idx : new int[] { r.taskType, numOfApps }) {
 			completed[idx]++;
 			serviceTimes.get(idx).add(serviceTime);
+			if (r.estimate >= 0) {
+				estimated[idx]++;
+				estError[idx] += serviceTime - r.estimate;
+				estAbsError[idx] += Math.abs(serviceTime - r.estimate);
+			}
 			if (r.tier != null)
 				completedByTier[idx][r.tier.ordinal()]++;
 			if (met) {
@@ -177,7 +195,8 @@ public final class DeadlineStatsLogger {
 					+ "rejected;failed;completed;on_time;late;unfinished;"
 					+ "on_time_pct;deadline_miss_pct;avg_service_time_s;p95_service_time_s;avg_lateness_s;"
 					+ "on_time_local_edge;on_time_remote_edge;on_time_cloud;"
-					+ "completed_local_edge;completed_remote_edge;completed_cloud");
+					+ "completed_local_edge;completed_remote_edge;completed_cloud;"
+					+ "estimated;est_mean_error_s;est_mean_abs_error_s");
 			bw.newLine();
 			for (int i = 0; i <= numOfApps; i++) {
 				String name = (i == numOfApps) ? "ALL_APPS" : SimSettings.getInstance().getTaskName(i);
@@ -186,14 +205,17 @@ public final class DeadlineStatsLogger {
 				int unf = total[i] - rejected[i] - failed[i] - completed[i];
 				List<Double> st = serviceTimes.get(i);
 				bw.write(String.format(Locale.US,
-						"%s;%.3f;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%.4f;%.4f;%.6f;%.6f;%.6f;%d;%d;%d;%d;%d;%d",
+						"%s;%.3f;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%.4f;%.4f;%.6f;%.6f;%.6f;%d;%d;%d;%d;%d;%d;%d;%.6f;%.6f",
 						name, deadline, total[i],
 						tierCount[i][0], tierCount[i][1], tierCount[i][2],
 						rejected[i], failed[i], completed[i], onTime[i], late, unf,
 						pct(onTime[i], total[i]), 100 - pct(onTime[i], total[i]),
 						mean(st), percentile(st, 95), late == 0 ? 0 : lateness[i] / late,
 						onTimeByTier[i][0], onTimeByTier[i][1], onTimeByTier[i][2],
-						completedByTier[i][0], completedByTier[i][1], completedByTier[i][2]));
+						completedByTier[i][0], completedByTier[i][1], completedByTier[i][2],
+						estimated[i],
+						estimated[i] == 0 ? 0 : estError[i] / estimated[i],
+						estimated[i] == 0 ? 0 : estAbsError[i] / estimated[i]));
 				bw.newLine();
 			}
 		} catch (IOException e) {
@@ -228,6 +250,7 @@ public final class DeadlineStatsLogger {
 		final int taskType;
 		final double submitTime;
 		TIER tier;
+		double estimate = -1; // estimated service time, -1 if none
 
 		TaskRecord(int taskType, double submitTime) {
 			this.taskType = taskType;

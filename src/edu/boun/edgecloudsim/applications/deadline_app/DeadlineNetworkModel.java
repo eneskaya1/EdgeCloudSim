@@ -442,6 +442,28 @@ public class DeadlineNetworkModel extends NetworkModel {
 		return result;
 	}
 
+	/**
+	 * Side-effect-free estimate of the current MAN upload delay.
+	 * Unlike {@link #getUploadDelay(int, int, Task)}, it does not record a MAN
+	 * transfer in the measurement window, so orchestrators can probe it freely.
+	 *
+	 * @return estimated delay in seconds, or 0 if the MAN is saturated
+	 */
+	public double estimateManUploadDelay() {
+		return calculateMM1(SimSettings.getInstance().getInternalLanDelay(),
+				MAN_BW, ManPoissonMeanForUpload, avgManTaskInputSize, numberOfMobileDevices);
+	}
+
+	/**
+	 * Side-effect-free estimate of the current MAN download delay.
+	 *
+	 * @return estimated delay in seconds, or 0 if the MAN is saturated
+	 */
+	public double estimateManDownloadDelay() {
+		return calculateMM1(SimSettings.getInstance().getInternalLanDelay(),
+				MAN_BW, ManPoissonMeanForDownload, avgManTaskOutputSize, numberOfMobileDevices);
+	}
+
 	/** Recalculates MAN queue parameters from the current measurement window. */
 	public void updateMM1QueueModel(){
 		// Recompute Poisson means and average sizes based on window statistics.
