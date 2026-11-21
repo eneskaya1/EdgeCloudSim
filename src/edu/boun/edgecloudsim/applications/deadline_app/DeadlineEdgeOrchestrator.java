@@ -56,7 +56,7 @@ import edu.boun.edgecloudsim.utils.SimUtils;
  *   cloud) the end-to-end completion time is estimated as
  *     upload delay + execution time (processor sharing) + download delay.
  *   Among the candidates that meet the deadline with a safety margin
- *   (ECT <= SAFETY_MARGIN * deadline) the cheapest tier is selected
+ *   (ECT <= margin * deadline, margin = 0.8 by default, -Dect.margin) the cheapest tier is selected
  *   (local edge < remote edge < cloud, i.e. least network resources);
  *   within a tier the VM with the smallest ECT wins. If no candidate is
  *   safely on time, the candidate with the smallest ECT is selected.
@@ -66,8 +66,41 @@ import edu.boun.edgecloudsim.utils.SimUtils;
  * Returns null if no VM can host task (caller handles rejection).
  */
 public class DeadlineEdgeOrchestrator extends EdgeOrchestrator {
-	/** A candidate is "safely on time" if ECT <= SAFETY_MARGIN * deadline. */
-	public static final double SAFETY_MARGIN = 0.8;
+	/**
+	 * Default safety margin: a candidate is "safely on time" if
+	 * ECT <= margin * deadline. Can be overridden with -Dect.margin=&lt;value&gt;.
+	 */
+	public static final double DEFAULT_SAFETY_MARGIN = 0.8;
+
+	/*
+	 * ECT variants (selected by the policy name):
+	 *   ECT        : proposed policy (cheapest safely-on-time tier, else fastest)
+	 *   ECT_GREEDY : ablation - always the candidate with the smallest ECT
+	 *   ECT_AVG    : ablation - task length / data sizes unknown; uses the
+	 *                application's average values from applications.xml
+	 *   ECT_FB     : ECT + online feedback correction: the mean estimation
+	 *                error (actual - estimated) of completed tasks is learned
+	 *                per tier (EWMA) and added to future estimates
+	 *   ECT_AC     : ECT + admission control (without feedback correction)
+	 *   ECT_FB_AC  : ECT_FB + admission control: a task whose best corrected
+	 *                estimate already misses its deadline is dropped at once
+	 */
+	private boolean ectPolicy;
+	private boolean ectGreedy;
+	private boolean ectAverageProfile;
+	private boolean ectFeedback;
+	private boolean ectAdmissionControl;
+	private double safetyMargin;
+
+	/** Weight of a new sample in the EWMA of the estimation error. */
+	public static final double FEEDBACK_WEIGHT = 0.02;
+
+	/** Learned estimation error (seconds) per tier rank, added to raw estimates (ECT_FB*). */
+	private final double[] correction = new double[3];
+
+	/** Decisions waiting for feedback: task id -> {submitTime, rawEstimate, tierRank}. */
+	private final Map<Integer, double[]> awaitingFeedback = new HashMap<>();
+	private double lastFeedbackPurge;
 
 	// Tier ranks used by ECT (lower = cheaper in network resources)
 	private static final int RANK_LOCAL_EDGE = 0;
@@ -104,12 +137,28 @@ public class DeadlineEdgeOrchestrator extends EdgeOrchestrator {
 		numberOfHost=SimSettings.getInstance().getNumOfEdgeHosts();
 		ectDecisions.clear();
 		pendingTasks.clear();
+
+		ectPolicy = policy.equals("ECT") || policy.equals("ECT_GREEDY") || policy.equals("ECT_AVG")
+				|| policy.equals("ECT_FB") || policy.equals("ECT_FB_AC") || policy.equals("ECT_AC");
+		ectGreedy = policy.equals("ECT_GREEDY");
+		ectAverageProfile = policy.equals("ECT_AVG");
+		ectFeedback = policy.equals("ECT_FB") || policy.equals("ECT_FB_AC");
+		ectAdmissionControl = policy.equals("ECT_FB_AC") || policy.equals("ECT_AC");
+		java.util.Arrays.fill(correction, 0);
+		awaitingFeedback.clear();
+		lastFeedbackPurge = 0;
+		safetyMargin = DEFAULT_SAFETY_MARGIN;
+		String margin = System.getProperty("ect.margin");
+		if(margin != null && !margin.trim().isEmpty())
+			safetyMargin = Double.parseDouble(margin.trim());
+		if(ectPolicy)
+			SimLogger.printLine("ECT variant: " + policy + ", safety margin: " + safetyMargin);
 	}
 
 	/** Selects edge or cloud execution according to the configured policy. */
 	@Override
 	public int getDeviceToOffload(Task task) {
-		if(policy.equals("ECT"))
+		if(ectPolicy)
 			return ectGetDeviceToOffload(task);
 
 		int result = 0;
@@ -161,7 +210,7 @@ public class DeadlineEdgeOrchestrator extends EdgeOrchestrator {
 
 	@Override
 	public Vm getVmToOffload(Task task, int deviceId) {
-		if(policy.equals("ECT"))
+		if(ectPolicy)
 			return ectDecisions.remove(task.getCloudletId());
 
 		// Select VM with maximum residual capacity that can host predicted load (Least Loaded / WORST FIT)
@@ -229,18 +278,30 @@ public class DeadlineEdgeOrchestrator extends EdgeOrchestrator {
 		double now = CloudSim.clock();
 		double deadline = DeadlineStatsLogger.getDeadline(task.getTaskType());
 		CpuUtilizationModel_Custom cpuModel = (CpuUtilizationModel_Custom) task.getUtilizationModelCpu();
+		double safeLimit = ectGreedy ? -1 : safetyMargin * deadline; // greedy: no candidate is "safe"
+
+		// Task profile used for the estimates: the actual task, or (ECT_AVG) a
+		// task with the application's average length and data sizes
+		Task profile = task;
+		if(ectAverageProfile){
+			double[] app = SimSettings.getInstance().getTaskLookUpTable()[task.getTaskType()];
+			profile = new Task(mobileId, 0, (long)app[7], 1, (long)app[5], (long)app[6],
+					new UtilizationModelFull(), new UtilizationModelFull(), new UtilizationModelFull());
+		}
+		double taskLength = profile.getCloudletLength();
 
 		// Network legs (0 means the link cannot carry the task right now)
-		double wlanUp = networkModel.getUploadDelay(mobileId, SimSettings.GENERIC_EDGE_DEVICE_ID, task);
-		double wlanDown = networkModel.getDownloadDelay(SimSettings.GENERIC_EDGE_DEVICE_ID, mobileId, task);
+		double wlanUp = networkModel.getUploadDelay(mobileId, SimSettings.GENERIC_EDGE_DEVICE_ID, profile);
+		double wlanDown = networkModel.getDownloadDelay(SimSettings.GENERIC_EDGE_DEVICE_ID, mobileId, profile);
 		double manUp = deadlineNetwork.estimateManUploadDelay();
 		double manDown = deadlineNetwork.estimateManDownloadDelay();
-		double wanUp = networkModel.getUploadDelay(mobileId, SimSettings.CLOUD_DATACENTER_ID, task);
-		double wanDown = networkModel.getDownloadDelay(SimSettings.CLOUD_DATACENTER_ID, mobileId, task);
+		double wanUp = networkModel.getUploadDelay(mobileId, SimSettings.CLOUD_DATACENTER_ID, profile);
+		double wanDown = networkModel.getDownloadDelay(SimSettings.CLOUD_DATACENTER_ID, mobileId, profile);
 
 		Vm bestVm = null;           // overall smallest ECT
 		double bestEct = Double.MAX_VALUE;
 		double bestArrival = 0;
+		int bestRank = RANK_LOCAL_EDGE;
 		Vm safeVm = null;           // cheapest tier among safely-on-time candidates
 		int safeRank = Integer.MAX_VALUE;
 		double safeEct = Double.MAX_VALUE;
@@ -264,13 +325,13 @@ public class DeadlineEdgeOrchestrator extends EdgeOrchestrator {
 						download += manDown;
 					}
 					double arrival = now + upload;
-					double ect = upload + estimateExecutionTime(vm, task.getCloudletLength(), now) + download;
 					int rank = local ? RANK_LOCAL_EDGE : RANK_REMOTE_EDGE;
+					double ect = upload + estimateExecutionTime(vm, taskLength, now) + download + correctionFor(rank);
 
 					if(ect < bestEct){
-						bestEct = ect; bestVm = vm; bestArrival = arrival;
+						bestEct = ect; bestVm = vm; bestArrival = arrival; bestRank = rank;
 					}
-					if(ect <= SAFETY_MARGIN * deadline && (rank < safeRank || (rank == safeRank && ect < safeEct))){
+					if(ect <= safeLimit && (rank < safeRank || (rank == safeRank && ect < safeEct))){
 						safeRank = rank; safeEct = ect; safeVm = vm; safeArrival = arrival;
 					}
 				}
@@ -286,12 +347,12 @@ public class DeadlineEdgeOrchestrator extends EdgeOrchestrator {
 					if(!fits(vm, cpuModel.predictUtilization(vm.getVmType())))
 						continue;
 					double arrival = now + wanUp;
-					double ect = wanUp + estimateExecutionTime(vm, task.getCloudletLength(), now) + wanDown;
+					double ect = wanUp + estimateExecutionTime(vm, taskLength, now) + wanDown + correctionFor(RANK_CLOUD);
 
 					if(ect < bestEct){
-						bestEct = ect; bestVm = vm; bestArrival = arrival;
+						bestEct = ect; bestVm = vm; bestArrival = arrival; bestRank = RANK_CLOUD;
 					}
-					if(ect <= SAFETY_MARGIN * deadline && (RANK_CLOUD < safeRank || (RANK_CLOUD == safeRank && ect < safeEct))){
+					if(ect <= safeLimit && (RANK_CLOUD < safeRank || (RANK_CLOUD == safeRank && ect < safeEct))){
 						safeRank = RANK_CLOUD; safeEct = ect; safeVm = vm; safeArrival = arrival;
 					}
 				}
@@ -304,13 +365,52 @@ public class DeadlineEdgeOrchestrator extends EdgeOrchestrator {
 
 		double selectedEct = (safeVm != null) ? safeEct : bestEct;
 		double arrival = (safeVm != null) ? safeArrival : bestArrival;
+		int selectedRank = (safeVm != null) ? safeRank : bestRank;
+
+		// Admission control: even the best (corrected) estimate misses the deadline
+		if(ectAdmissionControl && selectedEct > deadline){
+			DeadlineStatsLogger.getInstance().taskDropped(task.getCloudletId());
+			return SimSettings.GENERIC_EDGE_DEVICE_ID; // no VM remembered -> rejected downstream
+		}
 
 		ectDecisions.put(task.getCloudletId(), selected);
 		pendingTasks.computeIfAbsent(selected.getId(), k -> new ArrayList<>())
-			.add(new double[] { arrival, task.getCloudletLength() });
+			.add(new double[] { arrival, taskLength });
 		DeadlineStatsLogger.getInstance().taskEstimated(task.getCloudletId(), selectedEct);
 
+		if(ectFeedback){
+			double rawEstimate = selectedEct - correctionFor(selectedRank);
+			awaitingFeedback.put(task.getCloudletId(), new double[] { now, rawEstimate, selectedRank });
+			purgeFeedback(now);
+		}
+
 		return (selected instanceof CloudVM) ? SimSettings.CLOUD_DATACENTER_ID : SimSettings.GENERIC_EDGE_DEVICE_ID;
+	}
+
+	/** Learned correction for a tier (0 unless a feedback variant is active). */
+	private double correctionFor(int rank) {
+		return ectFeedback ? correction[rank] : 0;
+	}
+
+	/**
+	 * Feedback from the device manager: the result of a task reached the mobile
+	 * device. Updates the per-tier EWMA of the estimation error.
+	 */
+	public void taskCompleted(Task task, double now) {
+		double[] record = awaitingFeedback.remove(task.getCloudletId());
+		if(record == null)
+			return;
+		int rank = (int) record[2];
+		double error = (now - record[0]) - record[1];
+		correction[rank] = (1 - FEEDBACK_WEIGHT) * correction[rank] + FEEDBACK_WEIGHT * error;
+	}
+
+	/** Forget decisions of tasks that failed (no feedback will ever arrive). */
+	private void purgeFeedback(double now) {
+		if(now - lastFeedbackPurge < 60)
+			return;
+		lastFeedbackPurge = now;
+		awaitingFeedback.values().removeIf(r -> now - r[0] > 120);
 	}
 
 	/** Same admission rule as the competitors: predicted CPU % must fit into the free CPU %. */

@@ -121,3 +121,66 @@ java -cp "bin;lib/*" edu.boun.edgecloudsim.applications.deadline_app.MainApp \
 
 (Use `:` instead of `;` as the classpath separator on Linux/macOS.)
 Add `-Dedgecloudsim.seed=<n>` for reproducible runs.
+
+### Running Experiments (all platforms)
+
+`scripts/deadline_app/run_experiments.py` runs every (iteration, policy, number of
+devices) combination in its own JVM and spreads the jobs over the CPU cores. Within an
+iteration every policy gets the same seed (`1000 + iteration`), so all policies are
+compared on the same workload. Finished jobs are skipped when the command is repeated.
+
+```
+python scripts/deadline_app/run_experiments.py --name final --sim-time 20 --warmup 2 \
+    --devices 200 600 1000 1400 1800 --iterations 10 --parallel 7 \
+    --policies ECT NETWORK_BASED UTILIZATION_BASED RANDOM
+
+python scripts/deadline_app/python/summarize.py scripts/deadline_app/output/final --csv summary.csv
+```
+
+`--tag` and `--java-opt` let you run variants side by side, e.g.
+`--tag m0.6 --java-opt=-Dect.margin=0.6`. `summarize.py` prints the mean and 95%
+confidence interval over iterations of the on-time rate, failure rate, service time
+and tier shares (`--app` selects a single application).
+
+### ECT Variants (ablation)
+
+| Policy | Difference from `ECT` |
+| --- | --- |
+| `ECT_GREEDY` | Ignores the tier preference: always picks the candidate with the smallest ECT. |
+| `ECT_AVG` | Does not know the task's actual length / data sizes; uses the application's average values. |
+| `ECT_FB` | Online feedback correction: learns the mean estimation error (actual - estimated) of completed tasks per tier (EWMA, weight 0.02) and adds it to future estimates. |
+| `ECT_AC` | Admission control: if even the best estimate misses the deadline, the task is dropped immediately instead of loading the system. |
+| `ECT_FB_AC` | Feedback correction + admission control. |
+
+The safety margin (default 0.8) can be changed with `-Dect.margin=<value>`.
+Tasks dropped by admission control are counted in the `dropped` column of the
+`_DEADLINE.log` file, and as misses in `on_time_pct`. The core SimLogger records them
+as VM-capacity rejections.
+
+### Tuning Results
+
+Short runs (5 min simulation, 1 min warm-up, 2 iterations, seeds 1001-1002); full
+table in `scripts/deadline_app/results/tuning_summary.txt`. On-time rate, ALL_APPS:
+
+| Policy | 400 devices | 1200 devices | 2000 devices |
+| --- | --- | --- | --- |
+| NETWORK_BASED | 78.1% | 68.9% | 40.9% |
+| UTILIZATION_BASED | 80.3% | 44.0% | 21.7% |
+| RANDOM | 83.8% | 54.7% | 33.9% |
+| ECT (margin 0.6 / 0.8 / 1.0) | 97.8 / 97.9 / 98.0% | 95.2 / 95.9 / 94.2% | 53.5 / 54.5 / 51.2% |
+| ECT_GREEDY | 97.4% | 92.8% | 52.9% |
+| ECT_AVG | 84.3% | 72.4% | 16.8% |
+| ECT_FB | 97.9% | 95.8% | 49.3% |
+| ECT_AC | 98.0% | 96.4% | 88.5% (5.2% dropped) |
+| ECT_FB_AC | 98.0% | 96.4% | 91.0% (5.7% dropped) |
+
+Observations:
+* The safety margin hardly matters (0.8 kept). Preferring the cheapest tier helps a
+  little over pure greedy at medium load and uses much less cloud/MAN bandwidth.
+* Knowing the actual task size is essential: `ECT_AVG` is worse than the competitors
+  under high load.
+* Under overload, plain ECT's estimates become optimistic (+1.2 s), because tasks
+  arriving later slow down running ones. Admission control prevents this overload
+  collapse: by dropping about 5% of hopeless tasks it keeps the estimation error at
+  0.13 s and raises the on-time rate from 54% to 91%. Feedback correction alone does
+  not help, but it adds a little on top of admission control.

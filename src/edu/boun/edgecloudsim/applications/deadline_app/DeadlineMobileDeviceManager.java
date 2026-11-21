@@ -319,6 +319,8 @@ public class DeadlineMobileDeviceManager extends MobileDeviceManager {
 
 				SimLogger.getInstance().taskEnded(task.getCloudletId(), CloudSim.clock());
 				DeadlineStatsLogger.getInstance().taskCompleted(task.getCloudletId(), CloudSim.clock());
+				// Feedback for the ECT_FB variants (learns the estimation error)
+				((DeadlineEdgeOrchestrator) SimManager.getInstance().getEdgeOrchestrator()).taskCompleted(task, CloudSim.clock());
 				break;
 			}
 			default:

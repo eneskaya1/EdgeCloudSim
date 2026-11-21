@@ -55,6 +55,7 @@ public final class DeadlineStatsLogger {
 	private int[] total;          // tasks submitted after warm-up
 	private int[][] tierCount;    // [app][tier] tasks offloaded to each tier
 	private int[] rejected;       // rejected before offloading (VM capacity / bandwidth)
+	private int[] dropped;        // dropped by the orchestrator's admission control (ECT_FB_AC)
 	private int[] failed;         // failed after offloading (bandwidth / mobility / MAN)
 	private int[] completed;      // completed (on time or late)
 	private int[] onTime;         // completed within deadline
@@ -89,6 +90,7 @@ public final class DeadlineStatsLogger {
 		total = new int[n];
 		tierCount = new int[n][TIER.values().length];
 		rejected = new int[n];
+		dropped = new int[n];
 		failed = new int[n];
 		completed = new int[n];
 		onTime = new int[n];
@@ -138,6 +140,19 @@ public final class DeadlineStatsLogger {
 		rejected[numOfApps]++;
 	}
 
+	/**
+	 * The orchestrator dropped the task on purpose because it cannot meet its
+	 * deadline (admission control). The core SimLogger records it afterwards as
+	 * a VM-capacity rejection.
+	 */
+	public void taskDropped(int taskId) {
+		TaskRecord r = liveTasks.remove(taskId);
+		if (r == null)
+			return;
+		dropped[r.taskType]++;
+		dropped[numOfApps]++;
+	}
+
 	/** The task failed after offloading (bandwidth, MAN or mobility failure). */
 	public void taskFailed(int taskId) {
 		TaskRecord r = liveTasks.remove(taskId);
@@ -179,12 +194,12 @@ public final class DeadlineStatsLogger {
 	/** Writes the statistics file and prints a short console summary. */
 	public void simStopped() {
 		int all = numOfApps;
-		int unfinished = total[all] - rejected[all] - failed[all] - completed[all];
+		int unfinished = total[all] - rejected[all] - dropped[all] - failed[all] - completed[all];
 		SimLogger.printLine(String.format(Locale.US,
-				"deadline: on-time %.2f%% (miss %.2f%%) | tiers L/R/C: %d/%d/%d | rejected/failed/late/unfinished: %d/%d/%d/%d",
+				"deadline: on-time %.2f%% (miss %.2f%%) | tiers L/R/C: %d/%d/%d | rejected/dropped/failed/late/unfinished: %d/%d/%d/%d/%d",
 				pct(onTime[all], total[all]), 100 - pct(onTime[all], total[all]),
 				tierCount[all][0], tierCount[all][1], tierCount[all][2],
-				rejected[all], failed[all], completed[all] - onTime[all], unfinished));
+				rejected[all], dropped[all], failed[all], completed[all] - onTime[all], unfinished));
 
 		if (!SimLogger.isFileLogEnabled() || outputFolder == null)
 			return;
@@ -196,16 +211,16 @@ public final class DeadlineStatsLogger {
 					+ "on_time_pct;deadline_miss_pct;avg_service_time_s;p95_service_time_s;avg_lateness_s;"
 					+ "on_time_local_edge;on_time_remote_edge;on_time_cloud;"
 					+ "completed_local_edge;completed_remote_edge;completed_cloud;"
-					+ "estimated;est_mean_error_s;est_mean_abs_error_s");
+					+ "estimated;est_mean_error_s;est_mean_abs_error_s;dropped");
 			bw.newLine();
 			for (int i = 0; i <= numOfApps; i++) {
 				String name = (i == numOfApps) ? "ALL_APPS" : SimSettings.getInstance().getTaskName(i);
 				double deadline = (i == numOfApps) ? 0 : getDeadline(i);
 				int late = completed[i] - onTime[i];
-				int unf = total[i] - rejected[i] - failed[i] - completed[i];
+				int unf = total[i] - rejected[i] - dropped[i] - failed[i] - completed[i];
 				List<Double> st = serviceTimes.get(i);
 				bw.write(String.format(Locale.US,
-						"%s;%.3f;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%.4f;%.4f;%.6f;%.6f;%.6f;%d;%d;%d;%d;%d;%d;%d;%.6f;%.6f",
+						"%s;%.3f;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%.4f;%.4f;%.6f;%.6f;%.6f;%d;%d;%d;%d;%d;%d;%d;%.6f;%.6f;%d",
 						name, deadline, total[i],
 						tierCount[i][0], tierCount[i][1], tierCount[i][2],
 						rejected[i], failed[i], completed[i], onTime[i], late, unf,
@@ -215,7 +230,8 @@ public final class DeadlineStatsLogger {
 						completedByTier[i][0], completedByTier[i][1], completedByTier[i][2],
 						estimated[i],
 						estimated[i] == 0 ? 0 : estError[i] / estimated[i],
-						estimated[i] == 0 ? 0 : estAbsError[i] / estimated[i]));
+						estimated[i] == 0 ? 0 : estAbsError[i] / estimated[i],
+						dropped[i]));
 				bw.newLine();
 			}
 		} catch (IOException e) {
